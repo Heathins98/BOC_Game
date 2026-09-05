@@ -1,0 +1,21 @@
+{
+  "name": "@boc/playtest",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "server": "tsx src/server.ts",
+    "player": "tsx src/playerClient.ts",
+    "storyteller": "tsx src/storytellerClient.ts"
+  },
+  "dependencies": {
+    "@boc/server": "workspace:*",
+    "@boc/shared": "workspace:*",
+    "socket.io": "^4.8.1",
+    "socket.io-client": "^4.8.1"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
