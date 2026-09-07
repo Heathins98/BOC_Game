@@ -102,6 +102,8 @@ pnpm --filter @boc/playtest run server -- --players 5
 | `--port <n>` | `3131` | Port to listen on |
 | `--seed <n>` | random | Fixes the character deal, for reproducible testing |
 | `--townhall-seconds <n>` | `120` | Default Town Hall discussion timer (`0` = untimed by default) |
+| `--no-misregistration` | off | Recluse/Spy always read as their true alignment - skips the Storyteller misregistration prompt entirely |
+| `--vote-seconds <n>` | `5` | Per-voter window on the Nominations voting clock - no response in time counts as not voting |
 
 **2. Start the Storyteller** (one terminal):
 
@@ -117,13 +119,19 @@ pnpm --filter @boc/playtest run player
 
 Each player types a name; once everyone (players + Storyteller) has connected, the deal happens automatically.
 
+For repeated testing, skip the name prompt with `--player-name`:
+
+```bash
+pnpm --filter @boc/playtest run player -- --player-name Matt
+```
+
 ### The flow
 
 ```mermaid
 flowchart LR
     A[Night<br/>runs automatically] --> B[Day<br/>free discussion]
     B -->|Storyteller: townhall| C[Town Hall<br/>timed or untimed discussion]
-    C -->|timer ends, or force| D[Nominations<br/>open floor, immediate vote per nomination]
+    C -->|timer ends, or force| D[Nominations<br/>one at a time: nominate, discuss, then a sequential voting clock]
     D -->|Storyteller: force| E{Execution / win check}
     E -->|game continues| A
     E -->|win condition met| F[Game Over]
@@ -136,10 +144,10 @@ flowchart LR
 | Command | Effect |
 |---|---|
 | `ready` | Confirms you've read your role — the game won't start Night 1 until everyone has |
-| `nominate <name>` | Nominate a player (Nominations phase only) |
+| `nominate <name>` | Nominate a player (only while nominations are open, i.e. no nomination is currently being discussed/voted) |
 | `pass` | Nothing to nominate right now — you can still act again later this phase |
-| `vote <#>` | Vote in favor of nomination `#` |
-| `slayer <name>` | Use the Slayer's once-per-game power |
+| *(prompted)* | When it's your turn on the voting clock you'll get a `[VOTE]` prompt — type `yes` to vote, anything else (or nothing, in time) not to |
+| `slayer <name>` | Use — or claim to use — the Slayer's power (only the real Slayer's shot can ever hit) |
 | `status` | Re-print the current game state |
 
 **Storyteller**:
@@ -148,7 +156,8 @@ flowchart LR
 |---|---|
 | `help` | List every Storyteller command |
 | `townhall` / `townhall <seconds>` / `townhall off` | Start Town Hall, with the default timer, a custom one, or untimed |
-| `force` | End the current Town Hall or Nominations stage immediately |
+| `vote` | Start the voting clock for the nomination currently being discussed |
+| `force` | End Town Hall early, or end Nominations for the day right now (concluding any nomination in progress first) |
 | *(free text)* | Answers whatever `[DECISION NEEDED]` prompt is currently showing |
 
 Idle clients show a periodic "waiting on..." reminder, and every server action is logged with a timestamp. If the server goes down, connected clients detect it and exit cleanly instead of hanging.

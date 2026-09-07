@@ -40,7 +40,7 @@ export const TROUBLE_BREWING: ScriptDefinition = {
     { characterId: "empath" },
     { characterId: "fortune-teller" },
     { characterId: "butler" },
-    { characterId: "spy" },
+    { characterId: "spy", condition: "actsWhileDead" },
   ],
   otherNightOrder: [
     { characterId: "poisoner" },
@@ -52,7 +52,7 @@ export const TROUBLE_BREWING: ScriptDefinition = {
     { characterId: "fortune-teller" },
     { characterId: "undertaker", condition: "executionOccurredToday" },
     { characterId: "butler" },
-    { characterId: "spy" },
+    { characterId: "spy", condition: "actsWhileDead" },
   ],
 };
 

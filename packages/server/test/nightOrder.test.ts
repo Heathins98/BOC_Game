@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { Rng } from "@boc/shared";
 import { buildGrimoire } from "../src/testUtils/buildGrimoire.js";
 import { ScriptedDecisionProvider, ScriptedPlayerChoiceProvider } from "../src/testUtils/scriptedProviders.js";
 import { runNight } from "../src/engine/nightEngine.js";
@@ -20,7 +21,7 @@ function loggingHandlers(): { handlers: Partial<Record<string, NightActionHandle
 }
 
 describe("first night order", () => {
-  it("runs in-play characters in the documented order, skipping Spy (no state-mutating action)", async () => {
+  it("runs in-play characters in the documented order, ending with Spy", async () => {
     const grimoire = buildGrimoire([
       { id: "poisoner", characterId: "poisoner" },
       { id: "washerwoman", characterId: "washerwoman" },
@@ -37,6 +38,7 @@ describe("first night order", () => {
     await runNight({
       grimoire,
       nightNumber: 1,
+      rng: new Rng(1),
       decisionProvider: new ScriptedDecisionProvider(grimoire),
       playerChoiceProvider: new ScriptedPlayerChoiceProvider(),
       handlers,
@@ -51,7 +53,28 @@ describe("first night order", () => {
       "empath",
       "fortune-teller",
       "butler",
+      "spy",
     ]);
+  });
+
+  it("still runs the Spy even if they died earlier that day", async () => {
+    const grimoire = buildGrimoire([
+      { id: "spy", characterId: "spy" },
+      { id: "imp", characterId: "imp" },
+    ]);
+    grimoire.getPlayer("spy").alive = false;
+
+    const { handlers, log } = loggingHandlers();
+    await runNight({
+      grimoire,
+      nightNumber: 1,
+      rng: new Rng(1),
+      decisionProvider: new ScriptedDecisionProvider(grimoire),
+      playerChoiceProvider: new ScriptedPlayerChoiceProvider(),
+      handlers,
+    });
+
+    expect(log).toContain("spy");
   });
 });
 
@@ -75,6 +98,7 @@ describe("other night order", () => {
     await runNight({
       grimoire,
       nightNumber: 2,
+      rng: new Rng(1),
       decisionProvider: new ScriptedDecisionProvider(grimoire),
       playerChoiceProvider: new ScriptedPlayerChoiceProvider(),
       handlers,
@@ -105,6 +129,7 @@ describe("Ravenkeeper/Undertaker conditions", () => {
     await runNight({
       grimoire,
       nightNumber: 2,
+      rng: new Rng(1),
       decisionProvider: new ScriptedDecisionProvider(grimoire),
       playerChoiceProvider: new ScriptedPlayerChoiceProvider((prompt) => (prompt.characterId === "imp" ? ["rk"] : undefined)),
       handlers,

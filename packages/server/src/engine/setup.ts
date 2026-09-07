@@ -66,11 +66,8 @@ export function randomComposition(script: ScriptDefinition, playerCount: number,
   const minions = script.characters.filter((c) => c.team === "minion");
   const baronDef = minions.find((c) => c.setupModifier === "addsTwoOutsiders");
 
-  const includeBaron = baronDef !== undefined && base.minion >= 1 && rng.next() < 0.5;
-  const nonBaronMinions = rng.shuffle(minions.filter((c) => c.id !== baronDef?.id));
-  const chosenMinions = includeBaron
-    ? [baronDef as (typeof minions)[number], ...nonBaronMinions.slice(0, base.minion - 1)]
-    : nonBaronMinions.slice(0, base.minion);
+  const chosenMinions = rng.shuffle(minions).slice(0, base.minion);
+  const includeBaron = baronDef !== undefined && chosenMinions.some((c) => c.id === baronDef.id);
 
   const townsfolkCount = includeBaron ? base.townsfolk - 2 : base.townsfolk;
   const outsiderCount = includeBaron ? base.outsider + 2 : base.outsider;
@@ -94,10 +91,26 @@ export async function dealGame(
   rng: Rng,
 ): Promise<Grimoire> {
   validateComposition(script, players.length, characterIds);
+  return dealSeatedGame(players, script, rng.shuffle(characterIds), decisionProvider, rng);
+}
 
-  const shuffledCharacterIds = rng.shuffle(characterIds);
+/**
+ * Deals a game from a seat-ordered character list (`seatedCharacterIds[i]` goes to `players[i]`)
+ * instead of shuffling one internally. Used by the network layer so a Storyteller can hand-adjust
+ * a randomly drafted seating (swap who has which character) before the roles are confirmed and
+ * sent out - see randomComposition() + rng.shuffle() to produce the initial draft.
+ */
+export async function dealSeatedGame(
+  players: PlayerSeed[],
+  script: ScriptDefinition,
+  seatedCharacterIds: CharacterId[],
+  decisionProvider: StorytellerDecisionProvider,
+  rng: Rng,
+): Promise<Grimoire> {
+  validateComposition(script, players.length, seatedCharacterIds);
+
   const playerStates: PlayerState[] = players.map((seed, seat) => {
-    const characterId = shuffledCharacterIds[seat] as CharacterId;
+    const characterId = seatedCharacterIds[seat] as CharacterId;
     const def = script.characters.find((c) => c.id === characterId);
     if (!def) throw new Error(`Unknown character id "${characterId}"`);
     return {
@@ -122,7 +135,7 @@ export async function dealGame(
   const drunkPlayer = playerStates.find((p) => p.characterId === "drunk");
   if (drunkPlayer) {
     const notInPlayTownsfolk = script.characters.filter(
-      (c) => c.team === "townsfolk" && !characterIds.includes(c.id),
+      (c) => c.team === "townsfolk" && !seatedCharacterIds.includes(c.id),
     );
     if (notInPlayTownsfolk.length > 0) {
       drunkPlayer.drunk = true;
@@ -139,7 +152,7 @@ export async function dealGame(
   // Demon bluffs: 3 good characters not in play, shown to the Demon on the first
   // night (7+ players only - see the Demon Info step in nightEngine/demonMinionInfo).
   const notInPlayGoodCharacters = script.characters.filter(
-    (c) => (c.team === "townsfolk" || c.team === "outsider") && !characterIds.includes(c.id),
+    (c) => (c.team === "townsfolk" || c.team === "outsider") && !seatedCharacterIds.includes(c.id),
   );
   grimoire.demonBluffs = rng.shuffle(notInPlayGoodCharacters).slice(0, 3).map((c) => c.id);
 

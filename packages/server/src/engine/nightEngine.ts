@@ -1,4 +1,5 @@
 import type { PlayerChoiceProvider, PlayerId, StorytellerDecisionProvider } from "@boc/shared";
+import type { Rng } from "@boc/shared";
 import type { Grimoire } from "./grimoire.js";
 import type { NightActionHandler } from "./nightAction.js";
 import { TROUBLE_BREWING_NIGHT_HANDLERS } from "./characters/troubleBrewing/index.js";
@@ -11,6 +12,7 @@ const HANDLERS_BY_SCRIPT: Record<string, Partial<Record<string, NightActionHandl
 export interface RunNightOptions {
   grimoire: Grimoire;
   nightNumber: number;
+  rng: Rng;
   decisionProvider: StorytellerDecisionProvider;
   playerChoiceProvider: PlayerChoiceProvider;
   /** Overrides the script's registered handlers - a seam for tests that need to observe every invocation. */
@@ -29,6 +31,7 @@ export interface RunNightOptions {
 export async function runNight({
   grimoire,
   nightNumber,
+  rng,
   decisionProvider,
   playerChoiceProvider,
   handlers: handlerOverrides,
@@ -54,6 +57,8 @@ export async function runNight({
       if (grimoire.newlyDemonPlayerId !== playerId) continue;
     } else if (slot.condition === "executionOccurredToday") {
       if (!grimoire.executedPlayerId) continue;
+    } else if (slot.condition === "actsWhileDead") {
+      // no gating - this character's slot always fires, living or dead
     } else if (!grimoire.getPlayer(playerId).alive) {
       continue; // dead characters don't act unless their slot's condition says otherwise
     }
@@ -61,7 +66,7 @@ export async function runNight({
     const handler = handlers[slot.characterId];
     if (!handler) continue; // in-play but has no state-mutating night action
 
-    await handler({ grimoire, playerId, decisionProvider, playerChoiceProvider, privateResults });
+    await handler({ grimoire, playerId, rng, decisionProvider, playerChoiceProvider, privateResults });
   }
 
   return privateResults;

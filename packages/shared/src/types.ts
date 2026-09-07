@@ -9,7 +9,8 @@ export type Alignment = "good" | "evil";
 export type NightCondition =
   | "diedTonight" // Ravenkeeper: only wakes on the night they die
   | "becameDemonToday" // Scarlet Woman: only wakes the night they became the Demon
-  | "executionOccurredToday"; // Undertaker: only wakes if an execution happened today
+  | "executionOccurredToday" // Undertaker: only wakes if an execution happened today
+  | "actsWhileDead"; // Spy: still wakes/acts after death
 
 /** One entry in a script's ordered night sequence. */
 export interface NightOrderSlot {
@@ -71,4 +72,28 @@ export interface PlayerState {
   /** The fake Townsfolk identity this player believes they have, if their true characterId is "drunk". */
   drunkShowsAsCharacterId?: CharacterId | undefined;
   reminderTokens: string[];
+}
+
+/**
+ * The Spy's "you see the Grimoire" result - the true board state when healthy, or a
+ * fabricated one (same players/cast, characters reassigned as a derangement) when
+ * poisoned/drunk. Both cases share this exact shape so the player can't tell which
+ * they received.
+ */
+export interface SpyGrimoireResult {
+  kind: "grimoire";
+  redHerringId: PlayerId | null;
+  players: Pick<
+    PlayerState,
+    | "id"
+    | "characterId"
+    | "alignment"
+    | "alive"
+    | "poisoned"
+    | "drunk"
+    | "drunkShowsAsCharacterId"
+    | "protectedTonight"
+    | "usedSlayerPower"
+    | "butlerMasterId"
+  >[];
 }

@@ -22,7 +22,11 @@ export class NetworkDecisionProvider implements StorytellerDecisionProvider {
   grimoire!: Grimoire;
   private readonly pending = new Map<string, (value: string) => void>();
 
-  constructor(private readonly getStorytellerSocket: () => Socket | null) {}
+  constructor(
+    private readonly getStorytellerSocket: () => Socket | null,
+    /** When true, Recluse/Spy always read as their true alignment - no misregistration prompt. */
+    private readonly noMisregistration = false,
+  ) {}
 
   resolveDecision(requestId: string, value: string): void {
     this.pending.get(requestId)?.(value);
@@ -51,19 +55,51 @@ export class NetworkDecisionProvider implements StorytellerDecisionProvider {
 
   async chooseInfoClue(context: ChooseInfoClueContext): Promise<InfoClueResult> {
     if (context.truthfulCandidates.length === 0) return { kind: "none" };
-    const answer = await this.ask(
-      `${context.characterId}: pick the TRUE player and a DECOY, as "true,decoy".\n` +
-        `True options: ${context.truthfulCandidates.join(", ")}\nDecoy options: ${context.decoyCandidates.join(", ")}`,
-    );
-    const [trueRaw, decoyRaw] = answer.split(",").map((s) => s.trim());
-    const truePlayerId = context.truthfulCandidates.includes(trueRaw ?? "")
-      ? (trueRaw as PlayerId)
-      : (context.truthfulCandidates[0] as PlayerId);
-    const decoyId = context.decoyCandidates.includes(decoyRaw ?? "")
-      ? (decoyRaw as PlayerId)
-      : ((context.decoyCandidates.find((id) => id !== truePlayerId) ?? context.decoyCandidates[0]) as PlayerId);
-    const shownCharacterId = this.grimoire.getPlayer(truePlayerId).characterId;
-    return { kind: "pair", shownCharacterId, players: [truePlayerId, decoyId] };
+
+    const exampleTrue = context.truthfulCandidates[0] as PlayerId;
+    const exampleDecoy = (context.decoyCandidates.find((id) => id !== exampleTrue) ?? context.decoyCandidates[0]) as PlayerId;
+    const basePrompt =
+      `${context.characterId}: choose the TRUE player and a DECOY player.\n` +
+      `True options: ${context.truthfulCandidates.join(", ")}\n` +
+      `Decoy options: ${context.decoyCandidates.join(", ")}\n` +
+      `Reply with exactly two comma-separated names: TRUE,DECOY (e.g. "${exampleTrue},${exampleDecoy}")`;
+
+    let prompt = basePrompt;
+    const MAX_ATTEMPTS = 5;
+    for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+      const answer = await this.ask(prompt);
+      const parts = answer
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+
+      if (parts.length !== 2) {
+        prompt = `Expected exactly two comma-separated names, got "${answer.trim()}".\n${basePrompt}`;
+        continue;
+      }
+      const [truePlayerId, decoyId] = parts as [PlayerId, PlayerId];
+      if (!context.truthfulCandidates.includes(truePlayerId)) {
+        prompt = `"${truePlayerId}" is not a valid TRUE option (must be one of: ${context.truthfulCandidates.join(", ")}).\n${basePrompt}`;
+        continue;
+      }
+      if (!context.decoyCandidates.includes(decoyId)) {
+        prompt = `"${decoyId}" is not a valid DECOY option (must be one of: ${context.decoyCandidates.join(", ")}).\n${basePrompt}`;
+        continue;
+      }
+      if (decoyId === truePlayerId) {
+        prompt = `TRUE and DECOY must be different players - got "${truePlayerId}" for both.\n${basePrompt}`;
+        continue;
+      }
+
+      const shownCharacterId = this.grimoire.getPlayer(truePlayerId).characterId;
+      return { kind: "pair", shownCharacterId, players: [truePlayerId, decoyId] };
+    }
+
+    // No Storyteller connected (ask() resolves to "" immediately), or repeated bad
+    // input - fall back rather than loop forever.
+    const truePlayerId = context.truthfulCandidates[0] as PlayerId;
+    const decoyId = (context.decoyCandidates.find((id) => id !== truePlayerId) ?? context.decoyCandidates[0]) as PlayerId;
+    return { kind: "pair", shownCharacterId: this.grimoire.getPlayer(truePlayerId).characterId, players: [truePlayerId, decoyId] };
   }
 
   async fabricateInfoClue(context: { characterId: string; playerId: PlayerId }): Promise<InfoClueResult> {
@@ -99,11 +135,24 @@ export class NetworkDecisionProvider implements StorytellerDecisionProvider {
 
   async resolveMisregistration(context: MisregistrationContext): Promise<boolean> {
     const truthful = context.checkingFor === "demon" ? context.trueTeam === "demon" : context.trueTeam === "minion" || context.trueTeam === "demon";
+    if (this.noMisregistration) return truthful;
+    const characterName = context.characterId.charAt(0).toUpperCase() + context.characterId.slice(1);
+
+    if (context.checkingFor === "demon") {
+      const answer = await this.ask(
+        `${context.playerId} is the ${characterName} - they might register as good or evil (and as any character) to detection abilities; it's the Storyteller's call each time. ` +
+          `A Fortune Teller is checking right now whether ${context.playerId} is the Demon. Truthfully, ${context.playerId} is ${truthful ? "" : "not "}the Demon. ` +
+          `Should this check see them as the Demon? yes/no`,
+      );
+      return /^y/i.test(answer.trim());
+    }
+
     const answer = await this.ask(
-      `${context.playerId} (Recluse/Spy) is being checked as "${context.checkingFor}". Truthfully that reads as ${truthful}. Misregister instead? yes/no`,
+      `${context.playerId} is the ${characterName} - they might register as good or evil to detection abilities; it's the Storyteller's call each time. ` +
+        `A detection ability is checking right now whether ${context.playerId} is evil. Truthfully, ${context.playerId} is ${context.trueTeam} (${truthful ? "evil" : "good"}). ` +
+        `Should ${context.playerId} read as "good" or "evil" for this check?`,
     );
-    const flips = /^y/i.test(answer.trim());
-    return flips ? !truthful : truthful;
+    return /^e/i.test(answer.trim());
   }
 
   async choosePromotedMinion(candidates: PlayerId[]): Promise<PlayerId> {

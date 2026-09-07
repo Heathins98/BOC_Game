@@ -1,11 +1,36 @@
 import { createInterface } from "node:readline/promises";
+import { cursorTo, clearLine } from "node:readline";
 import { stdin, stdout } from "node:process";
 import { io } from "socket.io-client";
 
-const url = process.argv[2] ?? "http://localhost:3131";
+function parseArgs() {
+  const args = process.argv.slice(2);
+  const flagIndex = args.indexOf("--player-name");
+  let playerName: string | undefined;
+  if (flagIndex >= 0) {
+    playerName = args[flagIndex + 1];
+    args.splice(flagIndex, playerName !== undefined ? 2 : 1);
+  }
+  return { url: args[0] ?? "http://localhost:3131", playerName };
+}
+
+const { url, playerName } = parseArgs();
 const rl = createInterface({ input: stdin, output: stdout });
 
 const WAITING_REMINDER_INTERVAL_MS = 15_000;
+
+// Every real log clears any in-place heartbeat line first, so the heartbeat never gets
+// glued to the front of the next real output (see the setInterval below).
+const realLog = console.log.bind(console);
+let heartbeatVisible = false;
+console.log = (...args: unknown[]) => {
+  if (heartbeatVisible) {
+    cursorTo(stdout, 0);
+    clearLine(stdout, 0);
+    heartbeatVisible = false;
+  }
+  realLog(...args);
+};
 
 async function main() {
   const socket = io(url, { reconnection: false });
@@ -13,7 +38,7 @@ async function main() {
 
   let joined = false;
   while (!joined) {
-    const name = (await rl.question("Your name (letters/numbers/-/_ only, no spaces): ")).trim();
+    const name = playerName !== undefined ? playerName : (await rl.question("Your name (letters/numbers/-/_ only, no spaces): ")).trim();
     socket.emit("join", { name });
     const result = await new Promise<{ ok: boolean; message?: string }>((resolve) => {
       socket.once("joined", () => resolve({ ok: true }));
@@ -24,12 +49,20 @@ async function main() {
       console.log("Joined! Waiting for the rest of the table...");
     } else {
       console.log(`Could not join: ${result.message}`);
+      if (playerName !== undefined) {
+        console.log(`--player-name "${playerName}" was rejected - exiting instead of retrying.`);
+        process.exit(1);
+      }
     }
   }
 
   let pendingNightPrompt: { requestId: string } | null = null;
+  let pendingVotePrompt: { requestId: string } | null = null;
   let currentPhase = "setup";
   let hasReadied = false;
+  let lastPrintedLobby = "";
+  let lastPrintedReadyStatus = "";
+  let lastPrintedState = "";
 
   socket.on("disconnect", (reason: string) => {
     console.log(`\n❌ Server session ended (${reason}). Exiting.`);
@@ -40,11 +73,18 @@ async function main() {
     process.exit(1);
   });
 
-  socket.on("lobby:update", (u: { playersJoined: number; playersExpected: number; storytellerJoined: boolean }) => {
+  socket.on("lobby:update", (u: { playersJoined: number; playersExpected: number; storytellerJoined: boolean; readyToStart: boolean }) => {
+    const snapshot = JSON.stringify(u);
+    if (snapshot === lastPrintedLobby) return;
+    lastPrintedLobby = snapshot;
     console.log(`Lobby: ${u.playersJoined}/${u.playersExpected} players joined. Storyteller ${u.storytellerJoined ? "present" : "MISSING"}.`);
+    if (u.readyToStart) console.log("Everyone's here - waiting for the Storyteller to build and confirm the grimoire...");
   });
 
   socket.on("lobby:readyStatus", (r: { readyIds: string[]; waitingOnIds: string[] }) => {
+    const snapshot = JSON.stringify(r);
+    if (snapshot === lastPrintedReadyStatus) return;
+    lastPrintedReadyStatus = snapshot;
     if (r.waitingOnIds.length === 0) {
       console.log("Everyone is ready!");
     } else {
@@ -65,7 +105,52 @@ async function main() {
   });
 
   socket.on("night:info", (p: { result: unknown }) => {
+    const r = p.result as
+      | {
+          kind: "grimoire";
+          redHerringId: string | null;
+          players: {
+            id: string;
+            characterId: string;
+            alignment: string;
+            alive: boolean;
+            poisoned: boolean;
+            drunk: boolean;
+            drunkShowsAsCharacterId?: string;
+            protectedTonight: boolean;
+            usedSlayerPower: boolean;
+            butlerMasterId?: string;
+          }[];
+        }
+      | undefined;
+    if (r?.kind === "grimoire" && Array.isArray(r.players)) {
+      console.log("\n=== YOU SEE THE GRIMOIRE ===");
+      for (const pl of r.players) {
+        const flags = [
+          pl.alive ? "alive" : "DEAD",
+          pl.poisoned && "poisoned",
+          pl.drunk && "drunk",
+          pl.protectedTonight && "monk-protected",
+          pl.usedSlayerPower && "used-slayer",
+          pl.butlerMasterId && `master:${pl.butlerMasterId}`,
+          pl.drunkShowsAsCharacterId && `shows-as:${pl.drunkShowsAsCharacterId}`,
+        ]
+          .filter(Boolean)
+          .join(", ");
+        console.log(`  ${pl.id}: ${pl.characterId} (${pl.alignment}) [${flags}]`);
+      }
+      if (r.redHerringId) console.log(`  Red Herring: ${r.redHerringId}`);
+      console.log("");
+      return;
+    }
     console.log(`\n[YOUR NIGHT INFO] ${JSON.stringify(p.result)}\n`);
+  });
+
+  socket.on("vote:prompt", (p: { requestId: string; nominatorId: string; nomineeId: string; secondsLeft: number }) => {
+    pendingVotePrompt = { requestId: p.requestId };
+    console.log(
+      `\n[VOTE] Your turn! Vote to execute ${p.nomineeId} (nominated by ${p.nominatorId})? ~${p.secondsLeft}s - type "yes" to vote, anything else (or nothing) = not voting.`,
+    );
   });
 
   socket.on("info", (p: { message: string }) => console.log(`[info] ${p.message}`));
@@ -79,9 +164,16 @@ async function main() {
       day: number;
       townHallEndsAt: number | null;
       players: { id: string; alive: boolean }[];
-      nominations: { index: number; nominatorId: string; nomineeId: string; votes: number }[];
+      nominationSubPhase: "open" | "discussing" | "voting" | null;
+      activeVote: { nominatorId: string; nomineeId: string; currentVoterId: string | null; turnEndsAt: number | null; votesSoFar: number } | null;
+      blockHolder: { nominatorId: string; nomineeId: string; votes: number } | null;
+      nominationHistory: { nominatorId: string; nomineeId: string; votes: number; metThreshold: boolean }[];
     }) => {
       currentPhase = s.phase;
+      const snapshot = JSON.stringify(s);
+      if (snapshot === lastPrintedState) return;
+      lastPrintedState = snapshot;
+
       const phaseLabel = s.phase === "townhall" ? "Town Hall" : s.phase === "nominations" ? "Nominations" : s.phase;
       console.log(`\n[STATE] phase=${phaseLabel} night=${s.night} day=${s.day}`);
       if (s.phase === "townhall" && s.townHallEndsAt) {
@@ -89,12 +181,21 @@ async function main() {
         console.log(`Town Hall ends in ~${secondsLeft}s (or when the Storyteller forces it).`);
       }
       console.log("Players: " + s.players.map((p) => `${p.id}${p.alive ? "" : " (dead)"}`).join(", "));
-      if (s.nominations.length > 0) {
-        console.log("Nominations: " + s.nominations.map((n) => `#${n.index} ${n.nominatorId}→${n.nomineeId} (${n.votes} votes)`).join(" | "));
+      if (s.blockHolder) console.log(`On the block: ${s.blockHolder.nomineeId} (${s.blockHolder.votes} votes).`);
+      if (s.nominationHistory.length > 0) {
+        console.log(
+          "This round: " +
+            s.nominationHistory.map((n) => `${n.nominatorId}→${n.nomineeId} (${n.votes} votes${n.metThreshold ? ", met threshold" : ""})`).join(" | "),
+        );
+      }
+      if (s.activeVote) {
+        const turn = s.activeVote.currentVoterId ? ` - ${s.activeVote.currentVoterId}'s turn to vote` : "";
+        console.log(`Nomination: ${s.activeVote.nominatorId}→${s.activeVote.nomineeId} (${s.activeVote.votesSoFar} votes so far)${turn}.`);
       }
       if (s.phase === "day") console.log('Discuss freely. Waiting on the Storyteller to start Town Hall.');
       if (s.phase === "townhall") console.log('Discuss freely. Nominations open once Town Hall ends.');
-      if (s.phase === "nominations") console.log('cmd (nominate <name> | pass | vote <#> | slayer <name> | status)>');
+      if (s.phase === "nominations" && s.nominationSubPhase === "open") console.log('cmd (nominate <name> | pass | slayer <name> | status)>');
+      if (s.phase === "nominations" && s.nominationSubPhase === "discussing") console.log("Discuss freely. Waiting on the Storyteller to start voting.");
     },
   );
 
@@ -118,6 +219,11 @@ async function main() {
       pendingNightPrompt = null;
       return;
     }
+    if (pendingVotePrompt) {
+      socket.emit("vote:submitChoice", { requestId: pendingVotePrompt.requestId, value: trimmed });
+      pendingVotePrompt = null;
+      return;
+    }
     if (!hasReadied && trimmed.toLowerCase() === "ready") {
       hasReadied = true;
       socket.emit("player:ready");
@@ -132,12 +238,21 @@ async function main() {
   });
 
   setInterval(() => {
-    if (pendingNightPrompt) return;
+    if (pendingNightPrompt || pendingVotePrompt) return;
     socket.emit("status:poll");
+
+    let label: string | null = null;
     if (!hasReadied) {
-      console.log('[waiting] Still waiting on you to read your role and type "ready".');
+      label = 'Still waiting on you to read your role and type "ready".';
     } else if (currentPhase === "night" || currentPhase === "setup") {
-      console.log("[waiting] Waiting on other players' night actions...");
+      label = "Waiting on other players' night actions...";
+    }
+    if (label) {
+      // Redraws in place (no trailing newline) instead of scrolling a new line each tick.
+      cursorTo(stdout, 0);
+      clearLine(stdout, 0);
+      stdout.write(`[waiting] ${label}`);
+      heartbeatVisible = true;
     }
   }, WAITING_REMINDER_INTERVAL_MS);
 }

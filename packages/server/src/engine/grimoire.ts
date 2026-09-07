@@ -6,6 +6,8 @@ export interface NominationRecord {
   nominatorId: PlayerId;
   nomineeId: PlayerId;
   votersInFavor: Set<PlayerId>;
+  /** True once this nomination's voting clock has finished; no further votes are accepted. */
+  concluded: boolean;
 }
 
 export class Grimoire {
@@ -31,6 +33,8 @@ export class Grimoire {
   newlyDemonPlayerId: PlayerId | null = null;
   /** All nominations made today, in the order they were made. */
   nominationsToday: NominationRecord[] = [];
+  /** The nomination currently open for discussion/voting, if any - only one may be in flight at a time. */
+  activeNomination: NominationRecord | null = null;
 
   constructor(players: PlayerState[], script: ScriptDefinition) {
     this.script = script;
@@ -105,6 +109,30 @@ export class Grimoire {
     return [findDirection(-1), findDirection(1)];
   }
 
+  /**
+   * Voting order for a nomination against `nomineeId`: starts at the seat
+   * immediately after the nominee in `seatOrder` ("to their left" - a fixed
+   * convention, since seatOrder has no inherent handedness on its own) and
+   * wraps all the way around, ending with the nominee's own vote last.
+   * Includes dead players - callers decide whether to actually prompt a given
+   * voter via `hasVotingCapacity`. Note: a Butler whose turn in this order
+   * lands before their chosen master's simply can't cast a "yes" that round -
+   * castVote's existing master-must-go-first rule already handles this
+   * correctly, no special-casing needed here.
+   */
+  votingOrderFor(nomineeId: PlayerId): PlayerId[] {
+    const n = this.seatOrder.length;
+    const index = this.seatOrder.indexOf(nomineeId);
+    if (index === -1) throw new Error(`Unknown player: ${nomineeId}`);
+    return Array.from({ length: n }, (_, offset) => this.seatOrder[(index + 1 + offset) % n] as PlayerId);
+  }
+
+  /** Whether `playerId` could possibly cast a vote right now - alive, or dead with an unspent ghost vote. */
+  hasVotingCapacity(playerId: PlayerId): boolean {
+    const p = this.getPlayer(playerId);
+    return p.alive || p.ghostVoteAvailable;
+  }
+
   markDead(id: PlayerId): void {
     const player = this.getPlayer(id);
     player.alive = false;
@@ -130,6 +158,7 @@ export class Grimoire {
     this.executedPlayerId = null;
     this.newlyDemonPlayerId = null;
     this.nominationsToday = [];
+    this.activeNomination = null;
   }
 
   /** Moves from free Day discussion into the (timed or untimed) Town Hall sub-phase. Same calendar day, no state reset. */

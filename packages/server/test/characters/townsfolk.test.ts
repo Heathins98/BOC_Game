@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { InfoClueResult } from "@boc/shared";
+import { Rng, type InfoClueResult } from "@boc/shared";
 import { buildGrimoire } from "../../src/testUtils/buildGrimoire.js";
 import { ScriptedDecisionProvider, ScriptedPlayerChoiceProvider } from "../../src/testUtils/scriptedProviders.js";
 import {
@@ -19,6 +19,7 @@ function context(
   overrides: Partial<NightActionContext> & Pick<NightActionContext, "grimoire" | "playerId">,
 ): NightActionContext {
   return {
+    rng: new Rng(1),
     decisionProvider: new ScriptedDecisionProvider(overrides.grimoire),
     playerChoiceProvider: new ScriptedPlayerChoiceProvider(),
     privateResults: new Map(),

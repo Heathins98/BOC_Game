@@ -15,6 +15,8 @@ export interface ChooseInfoClueContext {
 
 export interface MisregistrationContext {
   playerId: PlayerId;
+  /** Which of the two misregistering characters this actually is - Recluse or Spy. */
+  characterId: CharacterId;
   trueTeam: Team;
   checkingFor: "evil" | "demon";
 }

@@ -1,9 +1,19 @@
 import type { CharacterId, PlayerChoiceProvider, PlayerId, ScriptDefinition, StorytellerDecisionProvider } from "@boc/shared";
 import { Rng } from "@boc/shared";
 import { Grimoire, type NominationRecord } from "./grimoire.js";
-import { dealGame, type PlayerSeed } from "./setup.js";
+import { dealGame, dealSeatedGame, type PlayerSeed } from "./setup.js";
 import { runNight } from "./nightEngine.js";
-import { castVote, nominate, resolveDayExecutions, useSlayerPower, type NominationOutcome } from "./dayEngine.js";
+import {
+  castVote,
+  concludeVote,
+  currentBlockHolder,
+  nominate,
+  resolveDayExecutions,
+  useSlayerPower,
+  type BlockHolder,
+  type NominationOutcome,
+  type VoteConclusion,
+} from "./dayEngine.js";
 import { checkSaintExecutionLoss, checkWinConditions, type WinResult } from "./winConditions.js";
 
 export interface GameConfig {
@@ -25,22 +35,41 @@ export class GameSession {
   readonly grimoire: Grimoire;
   private readonly decisionProvider: StorytellerDecisionProvider;
   private readonly playerChoiceProvider: PlayerChoiceProvider;
+  /** Retained past setup so night actions (e.g. the Spy's fabricated board) can use seeded randomness too. */
+  private readonly rng: Rng;
 
-  private constructor(grimoire: Grimoire, decisionProvider: StorytellerDecisionProvider, playerChoiceProvider: PlayerChoiceProvider) {
+  private constructor(grimoire: Grimoire, decisionProvider: StorytellerDecisionProvider, playerChoiceProvider: PlayerChoiceProvider, rng: Rng) {
     this.grimoire = grimoire;
     this.decisionProvider = decisionProvider;
     this.playerChoiceProvider = playerChoiceProvider;
+    this.rng = rng;
   }
 
   static async start(config: GameConfig): Promise<GameSession> {
     const grimoire = await dealGame(config.players, config.script, config.characterIds, config.decisionProvider, config.rng);
-    return new GameSession(grimoire, config.decisionProvider, config.playerChoiceProvider);
+    return new GameSession(grimoire, config.decisionProvider, config.playerChoiceProvider, config.rng);
+  }
+
+  /**
+   * Like start(), but takes a seat-ordered character list (seatedCharacterIds[i] -> players[i])
+   * instead of shuffling one internally - for a Storyteller-confirmed draft seating.
+   */
+  static async startSeated(config: Omit<GameConfig, "characterIds"> & { seatedCharacterIds: CharacterId[] }): Promise<GameSession> {
+    const grimoire = await dealSeatedGame(
+      config.players,
+      config.script,
+      config.seatedCharacterIds,
+      config.decisionProvider,
+      config.rng,
+    );
+    return new GameSession(grimoire, config.decisionProvider, config.playerChoiceProvider, config.rng);
   }
 
   async runNight(): Promise<Map<PlayerId, unknown>> {
     return runNight({
       grimoire: this.grimoire,
       nightNumber: this.grimoire.nightNumber + 1,
+      rng: this.rng,
       decisionProvider: this.decisionProvider,
       playerChoiceProvider: this.playerChoiceProvider,
     });
@@ -56,6 +85,22 @@ export class GameSession {
 
   castVote(nomination: NominationRecord, voterId: PlayerId): boolean {
     return castVote(this.grimoire, nomination, voterId);
+  }
+
+  concludeVote(): VoteConclusion {
+    return concludeVote(this.grimoire);
+  }
+
+  currentBlockHolder(): BlockHolder | null {
+    return currentBlockHolder(this.grimoire);
+  }
+
+  votingOrderFor(nomineeId: PlayerId): PlayerId[] {
+    return this.grimoire.votingOrderFor(nomineeId);
+  }
+
+  hasVotingCapacity(voterId: PlayerId): boolean {
+    return this.grimoire.hasVotingCapacity(voterId);
   }
 
   resolveDayExecutions(): { executedPlayerId: PlayerId | null } {

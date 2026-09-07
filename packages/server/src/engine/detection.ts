@@ -18,7 +18,7 @@ export async function registersAs(
   const trueAnswer = checkingFor === "demon" ? trueTeam === "demon" : player.alignment === "evil";
 
   if (player.characterId === "recluse" || player.characterId === "spy") {
-    return decisionProvider.resolveMisregistration({ playerId, trueTeam, checkingFor });
+    return decisionProvider.resolveMisregistration({ playerId, characterId: player.characterId, trueTeam, checkingFor });
   }
   return trueAnswer;
 }
