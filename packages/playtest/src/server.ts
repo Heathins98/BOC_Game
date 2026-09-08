@@ -43,6 +43,13 @@ function log(message: string): void {
   console.log(`[${new Date().toISOString()}] ${message}`);
 }
 
+/** For server-log lines: "playerId (characterId)" when a game is in progress and the player is in it, else just the bare id. */
+function describePlayer(playerId: PlayerId | undefined): string {
+  if (!playerId) return "unknown";
+  const characterId = session?.grimoire.allPlayers().find((p) => p.id === playerId)?.characterId;
+  return characterId ? `${playerId} (${characterId})` : playerId;
+}
+
 process.on("uncaughtException", (err) => {
   log(`UNCAUGHT EXCEPTION (server kept running): ${err.stack ?? err.message}`);
 });
@@ -509,6 +516,7 @@ async function confirmDraftAndStartGame(): Promise<void> {
     rng,
   });
   decisionProvider.grimoire = session.grimoire;
+  log("Grimoire: " + session.grimoire.allPlayers().map((p) => `${p.id}=${p.characterId} (${p.alignment})`).join(", "));
 
   broadcastRoles();
   broadcastFullGrimoire();
@@ -604,10 +612,9 @@ async function runNightDayLoop() {
   const activeSession = session!;
   while (!gameOver) {
     log(`--- Night ${activeSession.grimoire.nightNumber + 1} ---`);
-    const nightResults = await activeSession.runNight();
-    for (const [playerId, result] of nightResults) {
+    await activeSession.runNight((playerId, result) => {
       players.get(playerId)?.emit("night:info", { result });
-    }
+    });
     broadcastPublicState();
     broadcastFullGrimoire();
     if (checkAndAnnounceWin()) break;
@@ -750,7 +757,7 @@ io.on("connection", (socket) => {
 
   socket.on("night:submitChoice", ({ requestId, value }: { requestId: string; value: string }) => {
     const playerId = socket.data.playerId as PlayerId | undefined;
-    log(`${playerId ?? "unknown"} answered a night prompt: ${value}`);
+    log(`${describePlayer(playerId)} answered a night prompt: ${value}`);
     playerChoiceProvider.resolveChoice(requestId, value, socket.id);
   });
 
@@ -758,7 +765,7 @@ io.on("connection", (socket) => {
     const pending = pendingVoteResponses.get(requestId);
     if (!pending || socket.data.playerId !== pending.voterId) return;
     const playerId = socket.data.playerId as PlayerId | undefined;
-    log(`${playerId ?? "unknown"} voted: ${value}`);
+    log(`${describePlayer(playerId)} voted: ${value}`);
     pending.finish(/^y/i.test(value.trim()));
   });
 

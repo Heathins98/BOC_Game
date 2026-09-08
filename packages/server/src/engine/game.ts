@@ -65,13 +65,14 @@ export class GameSession {
     return new GameSession(grimoire, config.decisionProvider, config.playerChoiceProvider, config.rng);
   }
 
-  async runNight(): Promise<Map<PlayerId, unknown>> {
+  async runNight(onResult?: (playerId: PlayerId, result: unknown) => void): Promise<Map<PlayerId, unknown>> {
     return runNight({
       grimoire: this.grimoire,
       nightNumber: this.grimoire.nightNumber + 1,
       rng: this.rng,
       decisionProvider: this.decisionProvider,
       playerChoiceProvider: this.playerChoiceProvider,
+      onResult,
     });
   }
 
