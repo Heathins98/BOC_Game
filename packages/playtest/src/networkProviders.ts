@@ -20,7 +20,7 @@ import type { Grimoire } from "@boc/server";
  */
 export class NetworkDecisionProvider implements StorytellerDecisionProvider {
   grimoire!: Grimoire;
-  private readonly pending = new Map<string, (value: string) => void>();
+  private readonly pending = new Map<string, { socketId: string; resolve: (value: string) => void }>();
 
   constructor(
     private readonly getStorytellerSocket: () => Socket | null,
@@ -28,20 +28,32 @@ export class NetworkDecisionProvider implements StorytellerDecisionProvider {
     private readonly noMisregistration = false,
   ) {}
 
-  resolveDecision(requestId: string, value: string): void {
-    this.pending.get(requestId)?.(value);
+  /** Only resolves if `fromSocketId` is the socket the prompt was actually sent to - prevents another connection from answering on the Storyteller's behalf. */
+  resolveDecision(requestId: string, value: string, fromSocketId: string): void {
+    const entry = this.pending.get(requestId);
+    if (!entry || entry.socketId !== fromSocketId) return;
     this.pending.delete(requestId);
+    entry.resolve(value);
+  }
+
+  /** Falls back the same way as "no Storyteller connected" if the socket that was asked disconnects before answering - otherwise the game would hang forever. */
+  handleDisconnect(socketId: string): void {
+    for (const [requestId, entry] of this.pending) {
+      if (entry.socketId !== socketId) continue;
+      this.pending.delete(requestId);
+      entry.resolve("");
+    }
   }
 
   private ask(prompt: string): Promise<string> {
     const requestId = randomUUID();
     return new Promise((resolve) => {
-      this.pending.set(requestId, resolve);
       const socket = this.getStorytellerSocket();
       if (!socket) {
         resolve(""); // no Storyteller connected - fall back to defaults below
         return;
       }
+      this.pending.set(requestId, { socketId: socket.id, resolve });
       socket.emit("st:decisionRequest", { requestId, prompt });
     });
   }
@@ -178,13 +190,25 @@ export class NetworkDecisionProvider implements StorytellerDecisionProvider {
  * currently being asked. Same free-text-prompt/parse-here approach as above.
  */
 export class NetworkPlayerChoiceProvider implements PlayerChoiceProvider {
-  private readonly pending = new Map<string, (value: string) => void>();
+  private readonly pending = new Map<string, { socketId: string; resolve: (value: string) => void }>();
 
   constructor(private readonly getPlayerSocket: (playerId: PlayerId) => Socket | undefined) {}
 
-  resolveChoice(requestId: string, value: string): void {
-    this.pending.get(requestId)?.(value);
+  /** Only resolves if `fromSocketId` is the socket the prompt was actually sent to - prevents another connection from answering on that player's behalf. */
+  resolveChoice(requestId: string, value: string, fromSocketId: string): void {
+    const entry = this.pending.get(requestId);
+    if (!entry || entry.socketId !== fromSocketId) return;
     this.pending.delete(requestId);
+    entry.resolve(value);
+  }
+
+  /** Falls back to the empty answer (which requestPlayerChoice below turns into its candidate fallback) if the targeted player disconnects before answering - otherwise the game would hang forever. */
+  handleDisconnect(socketId: string): void {
+    for (const [requestId, entry] of this.pending) {
+      if (entry.socketId !== socketId) continue;
+      this.pending.delete(requestId);
+      entry.resolve("");
+    }
   }
 
   async requestPlayerChoice(prompt: ChoosePlayersPrompt): Promise<PlayerId[]> {
@@ -195,7 +219,7 @@ export class NetworkPlayerChoiceProvider implements PlayerChoiceProvider {
     const requestId = randomUUID();
     const promptText = `As the ${prompt.characterId}, choose ${prompt.count} player(s) from: ${prompt.candidates.join(", ")}`;
     const answer = await new Promise<string>((resolve) => {
-      this.pending.set(requestId, resolve);
+      this.pending.set(requestId, { socketId: socket.id, resolve });
       socket.emit("night:prompt", { requestId, prompt: promptText, count: prompt.count, candidates: prompt.candidates });
     });
 

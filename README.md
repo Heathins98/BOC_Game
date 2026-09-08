@@ -96,10 +96,13 @@ The playtest tool needs **one server process** plus **one terminal per person at
 pnpm --filter @boc/playtest run server -- --players 5
 ```
 
+The server prints a random **session code** on startup (e.g. `Session code: 482913`) — the Storyteller connects with it first, then shares it with the players joining. It's the shared secret that gates who can join the table and who can claim the Storyteller role, so don't post it somewhere public.
+
 | Flag | Default | Meaning |
 |---|---|---|
 | `--players <n>` | `5` | How many players to wait for before dealing |
 | `--port <n>` | `3131` | Port to listen on |
+| `--code <value>` | random | The session code everyone needs to join; set this to reuse the same code across repeated test runs |
 | `--seed <n>` | random | Fixes the character deal, for reproducible testing |
 | `--townhall-seconds <n>` | `120` | Default Town Hall discussion timer (`0` = untimed by default) |
 | `--no-misregistration` | off | Recluse/Spy always read as their true alignment - skips the Storyteller misregistration prompt entirely |
@@ -111,18 +114,20 @@ pnpm --filter @boc/playtest run server -- --players 5
 pnpm --filter @boc/playtest run storyteller
 ```
 
+It prompts for the session code (or pass it with `--code`); only one Storyteller can be connected at a time.
+
 **3. Start each player** (one terminal per player):
 
 ```bash
 pnpm --filter @boc/playtest run player
 ```
 
-Each player types a name; once everyone (players + Storyteller) has connected, the deal happens automatically.
+Each player enters the session code (or passes it with `--code`) and types a name; once everyone (players + Storyteller) has connected, the deal happens automatically.
 
-For repeated testing, skip the name prompt with `--player-name`:
+For repeated testing, skip the prompts with `--player-name` and `--code`:
 
 ```bash
-pnpm --filter @boc/playtest run player -- --player-name Matt
+pnpm --filter @boc/playtest run player -- --player-name Matt --code 482913
 ```
 
 ### The flow

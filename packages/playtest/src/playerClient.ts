@@ -5,16 +5,19 @@ import { io } from "socket.io-client";
 
 function parseArgs() {
   const args = process.argv.slice(2);
-  const flagIndex = args.indexOf("--player-name");
-  let playerName: string | undefined;
-  if (flagIndex >= 0) {
-    playerName = args[flagIndex + 1];
-    args.splice(flagIndex, playerName !== undefined ? 2 : 1);
-  }
-  return { url: args[0] ?? "http://localhost:3131", playerName };
+  const takeFlag = (flag: string): string | undefined => {
+    const i = args.indexOf(flag);
+    if (i < 0) return undefined;
+    const value = args[i + 1];
+    args.splice(i, value !== undefined ? 2 : 1);
+    return value;
+  };
+  const playerName = takeFlag("--player-name");
+  const code = takeFlag("--code");
+  return { url: args[0] ?? "http://localhost:3131", playerName, code };
 }
 
-const { url, playerName } = parseArgs();
+const { url, playerName, code: codeFlag } = parseArgs();
 const rl = createInterface({ input: stdin, output: stdout });
 
 const WAITING_REMINDER_INTERVAL_MS = 15_000;
@@ -33,22 +36,40 @@ console.log = (...args: unknown[]) => {
 };
 
 async function main() {
+  console.log(`Connecting to ${url}...`);
   const socket = io(url, { reconnection: false });
+
+  socket.on("disconnect", (reason: string) => {
+    console.log(`\n❌ Server session ended (${reason}). Exiting.`);
+    process.exit(1);
+  });
+  socket.on("connect_error", (err: Error) => {
+    console.log(`\n❌ Could not reach the server (${err.message}). Exiting.`);
+    process.exit(1);
+  });
+
   await new Promise<void>((resolve) => socket.on("connect", () => resolve()));
+
+  const code = codeFlag !== undefined ? codeFlag : (await rl.question("Session code: ")).trim();
 
   let joined = false;
   while (!joined) {
     const name = playerName !== undefined ? playerName : (await rl.question("Your name (letters/numbers/-/_ only, no spaces): ")).trim();
-    socket.emit("join", { name });
-    const result = await new Promise<{ ok: boolean; message?: string }>((resolve) => {
+    console.log(`Connected. Joining as ${name}...`);
+    socket.emit("join", { name, code });
+    const result = await new Promise<{ ok: boolean; message?: string; reason?: string | undefined }>((resolve) => {
       socket.once("joined", () => resolve({ ok: true }));
-      socket.once("error", (e: { message: string }) => resolve({ ok: false, message: e.message }));
+      socket.once("error", (e: { message: string; reason?: string }) => resolve({ ok: false, message: e.message, reason: e.reason }));
     });
     if (result.ok) {
       joined = true;
       console.log("Joined! Waiting for the rest of the table...");
     } else {
       console.log(`Could not join: ${result.message}`);
+      if (result.reason === "invalid-code") {
+        console.log("The session code was rejected - exiting instead of retrying.");
+        process.exit(1);
+      }
       if (playerName !== undefined) {
         console.log(`--player-name "${playerName}" was rejected - exiting instead of retrying.`);
         process.exit(1);
@@ -59,19 +80,11 @@ async function main() {
   let pendingNightPrompt: { requestId: string } | null = null;
   let pendingVotePrompt: { requestId: string } | null = null;
   let currentPhase = "setup";
+  let currentTownHallEndsAt: number | null = null;
   let hasReadied = false;
   let lastPrintedLobby = "";
   let lastPrintedReadyStatus = "";
   let lastPrintedState = "";
-
-  socket.on("disconnect", (reason: string) => {
-    console.log(`\n❌ Server session ended (${reason}). Exiting.`);
-    process.exit(1);
-  });
-  socket.on("connect_error", (err: Error) => {
-    console.log(`\n❌ Could not reach the server (${err.message}). Exiting.`);
-    process.exit(1);
-  });
 
   socket.on("lobby:update", (u: { playersJoined: number; playersExpected: number; storytellerJoined: boolean; readyToStart: boolean }) => {
     const snapshot = JSON.stringify(u);
@@ -170,14 +183,15 @@ async function main() {
       nominationHistory: { nominatorId: string; nomineeId: string; votes: number; metThreshold: boolean }[];
     }) => {
       currentPhase = s.phase;
-      const snapshot = JSON.stringify(s);
+      currentTownHallEndsAt = s.townHallEndsAt;
+      const secondsLeft = s.phase === "townhall" && s.townHallEndsAt ? Math.max(0, Math.round((s.townHallEndsAt - Date.now()) / 1000)) : null;
+      const snapshot = JSON.stringify({ s, secondsLeft });
       if (snapshot === lastPrintedState) return;
       lastPrintedState = snapshot;
 
       const phaseLabel = s.phase === "townhall" ? "Town Hall" : s.phase === "nominations" ? "Nominations" : s.phase;
       console.log(`\n[STATE] phase=${phaseLabel} night=${s.night} day=${s.day}`);
-      if (s.phase === "townhall" && s.townHallEndsAt) {
-        const secondsLeft = Math.max(0, Math.round((s.townHallEndsAt - Date.now()) / 1000));
+      if (s.phase === "townhall" && secondsLeft !== null) {
         console.log(`Town Hall ends in ~${secondsLeft}s (or when the Storyteller forces it).`);
       }
       console.log("Players: " + s.players.map((p) => `${p.id}${p.alive ? "" : " (dead)"}`).join(", "));
@@ -239,6 +253,7 @@ async function main() {
 
   setInterval(() => {
     if (pendingNightPrompt || pendingVotePrompt) return;
+    if (rl.line.length > 0) return; // don't clobber a command the user is mid-typing
     socket.emit("status:poll");
 
     let label: string | null = null;
@@ -246,6 +261,9 @@ async function main() {
       label = 'Still waiting on you to read your role and type "ready".';
     } else if (currentPhase === "night" || currentPhase === "setup") {
       label = "Waiting on other players' night actions...";
+    } else if (currentPhase === "townhall" && currentTownHallEndsAt) {
+      const secondsLeft = Math.max(0, Math.round((currentTownHallEndsAt - Date.now()) / 1000));
+      label = `Town Hall ends in ~${secondsLeft}s (or when the Storyteller forces it).`;
     }
     if (label) {
       // Redraws in place (no trailing newline) instead of scrolling a new line each tick.

@@ -3,7 +3,18 @@ import { cursorTo, clearLine } from "node:readline";
 import { stdin, stdout } from "node:process";
 import { io } from "socket.io-client";
 
-const url = process.argv[2] ?? "http://localhost:3131";
+function parseArgs() {
+  const args = process.argv.slice(2);
+  const flagIndex = args.indexOf("--code");
+  let code: string | undefined;
+  if (flagIndex >= 0) {
+    code = args[flagIndex + 1];
+    args.splice(flagIndex, code !== undefined ? 2 : 1);
+  }
+  return { url: args[0] ?? "http://localhost:3131", code };
+}
+
+const { url, code: codeFlag } = parseArgs();
 const rl = createInterface({ input: stdin, output: stdout });
 
 const WAITING_REMINDER_INTERVAL_MS = 15_000;
@@ -24,6 +35,7 @@ console.log = (...args: unknown[]) => {
 let pendingDecision: { requestId: string } | null = null;
 let currentPhase = "setup";
 let nominationSubPhase: "open" | "discussing" | "voting" | null = null;
+let currentTownHallEndsAt: number | null = null;
 let readyToStart = false;
 let draftInProgress = false;
 let lastPrintedLobby = "";
@@ -52,15 +64,9 @@ function printHelp() {
 `);
 }
 
-function main() {
+async function main() {
+  console.log(`Connecting to ${url}...`);
   const socket = io(url, { reconnection: false });
-
-  socket.on("connect", () => socket.emit("join-storyteller"));
-  socket.on("joined-storyteller", () => {
-    console.log('Joined as Storyteller. Waiting for all players to join... (type "help" any time for commands)');
-  });
-  socket.on("error", (p: { message: string }) => console.log(`[error] ${p.message}`));
-  socket.on("info", (p: { message: string }) => console.log(`[info] ${p.message}`));
 
   socket.on("disconnect", (reason: string) => {
     console.log(`\n❌ Server session ended (${reason}). Exiting.`);
@@ -70,6 +76,24 @@ function main() {
     console.log(`\n❌ Could not reach the server (${err.message}). Exiting.`);
     process.exit(1);
   });
+
+  await new Promise<void>((resolve) => socket.on("connect", () => resolve()));
+
+  const code = codeFlag !== undefined ? codeFlag : (await rl.question("Storyteller code: ")).trim();
+  console.log("Connected. Claiming the Storyteller role...");
+  socket.emit("join-storyteller", { code });
+  const result = await new Promise<{ ok: boolean; message?: string }>((resolve) => {
+    socket.once("joined-storyteller", () => resolve({ ok: true }));
+    socket.once("error", (e: { message: string }) => resolve({ ok: false, message: e.message }));
+  });
+  if (!result.ok) {
+    console.log(`Could not join as Storyteller: ${result.message}`);
+    process.exit(1);
+  }
+  console.log('Joined as Storyteller. Waiting for all players to join... (type "help" any time for commands)');
+
+  socket.on("error", (p: { message: string }) => console.log(`[error] ${p.message}`));
+  socket.on("info", (p: { message: string }) => console.log(`[info] ${p.message}`));
 
   socket.on("lobby:update", (u: { playersJoined: number; playersExpected: number; readyToStart: boolean }) => {
     readyToStart = u.readyToStart;
@@ -163,14 +187,15 @@ function main() {
     }) => {
       currentPhase = s.phase;
       nominationSubPhase = s.nominationSubPhase;
-      const snapshot = JSON.stringify(s);
+      currentTownHallEndsAt = s.townHallEndsAt;
+      const secondsLeft = s.phase === "townhall" && s.townHallEndsAt ? Math.max(0, Math.round((s.townHallEndsAt - Date.now()) / 1000)) : null;
+      const snapshot = JSON.stringify({ s, secondsLeft });
       if (snapshot === lastPrintedState) return;
       lastPrintedState = snapshot;
 
       const phaseLabel = s.phase === "townhall" ? "Town Hall" : s.phase === "nominations" ? "Nominations" : s.phase;
       console.log(`\n[STATE] phase=${phaseLabel} night=${s.night} day=${s.day}`);
-      if (s.phase === "townhall" && s.townHallEndsAt) {
-        const secondsLeft = Math.max(0, Math.round((s.townHallEndsAt - Date.now()) / 1000));
+      if (s.phase === "townhall" && secondsLeft !== null) {
         console.log(`Town Hall ends in ~${secondsLeft}s (or type "force" to end it now).`);
       }
       if (s.blockHolder) console.log(`On the block: ${s.blockHolder.nomineeId} (${s.blockHolder.votes} votes).`);
@@ -328,11 +353,16 @@ function main() {
 
   setInterval(() => {
     if (pendingDecision) return;
+    if (rl.line.length > 0) return; // don't clobber a command the user is mid-typing
     socket.emit("status:poll");
 
     let label: string | null = null;
     if (currentPhase === "night") label = "Night is running automatically...";
     else if (currentPhase === "day") label = 'Free discussion - type "townhall" when ready.';
+    else if (currentPhase === "townhall" && currentTownHallEndsAt) {
+      const secondsLeft = Math.max(0, Math.round((currentTownHallEndsAt - Date.now()) / 1000));
+      label = `Town Hall ends in ~${secondsLeft}s (or type "force" to end it now).`;
+    }
     if (label) {
       // Redraws in place (no trailing newline) instead of scrolling a new line each tick.
       cursorTo(stdout, 0);
