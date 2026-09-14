@@ -20,7 +20,7 @@ import type { Grimoire } from "@boc/server";
  */
 export class NetworkDecisionProvider implements StorytellerDecisionProvider {
   grimoire!: Grimoire;
-  private readonly pending = new Map<string, (value: string) => void>();
+  private readonly pending = new Map<string, { socketId: string; resolve: (value: string) => void }>();
 
   constructor(
     private readonly getStorytellerSocket: () => Socket | null,
@@ -28,29 +28,46 @@ export class NetworkDecisionProvider implements StorytellerDecisionProvider {
     private readonly noMisregistration = false,
   ) {}
 
-  resolveDecision(requestId: string, value: string): void {
-    this.pending.get(requestId)?.(value);
+  /** Only resolves if `fromSocketId` is the socket the prompt was actually sent to - prevents another connection from answering on the Storyteller's behalf. */
+  resolveDecision(requestId: string, value: string, fromSocketId: string): void {
+    const entry = this.pending.get(requestId);
+    if (!entry || entry.socketId !== fromSocketId) return;
     this.pending.delete(requestId);
+    entry.resolve(value);
+  }
+
+  /** Falls back the same way as "no Storyteller connected" if the socket that was asked disconnects before answering - otherwise the game would hang forever. */
+  handleDisconnect(socketId: string): void {
+    for (const [requestId, entry] of this.pending) {
+      if (entry.socketId !== socketId) continue;
+      this.pending.delete(requestId);
+      entry.resolve("");
+    }
   }
 
   private ask(prompt: string): Promise<string> {
     const requestId = randomUUID();
     return new Promise((resolve) => {
-      this.pending.set(requestId, resolve);
       const socket = this.getStorytellerSocket();
       if (!socket) {
         resolve(""); // no Storyteller connected - fall back to defaults below
         return;
       }
+      this.pending.set(requestId, { socketId: socket.id, resolve });
       socket.emit("st:decisionRequest", { requestId, prompt });
     });
   }
 
   async chooseRedHerring(candidates: PlayerId[]): Promise<PlayerId> {
-    const answer = await this.ask(
-      `Choose the Red Herring - a good player who will always register as the Demon to the Fortune Teller.\nOptions: ${candidates.join(", ")}`,
-    );
-    return candidates.includes(answer.trim()) ? answer.trim() : (candidates[0] as PlayerId);
+    const basePrompt = `Choose the Red Herring - a good player who will always register as the Demon to the Fortune Teller.\nOptions: ${candidates.join(", ")}`;
+    let prompt = basePrompt;
+    const MAX_ATTEMPTS = 5;
+    for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+      const answer = (await this.ask(prompt)).trim();
+      if (candidates.includes(answer)) return answer;
+      prompt = `"${answer}" is not a valid option (must be one of: ${candidates.join(", ")}).\n${basePrompt}`;
+    }
+    return candidates[0] as PlayerId;
   }
 
   async chooseInfoClue(context: ChooseInfoClueContext): Promise<InfoClueResult> {
@@ -156,8 +173,15 @@ export class NetworkDecisionProvider implements StorytellerDecisionProvider {
   }
 
   async choosePromotedMinion(candidates: PlayerId[]): Promise<PlayerId> {
-    const answer = await this.ask(`A Minion must become the new Demon.\nOptions: ${candidates.join(", ")}`);
-    return candidates.includes(answer.trim()) ? answer.trim() : (candidates[0] as PlayerId);
+    const basePrompt = `A Minion must become the new Demon.\nOptions: ${candidates.join(", ")}`;
+    let prompt = basePrompt;
+    const MAX_ATTEMPTS = 5;
+    for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+      const answer = (await this.ask(prompt)).trim();
+      if (candidates.includes(answer)) return answer;
+      prompt = `"${answer}" is not a valid option (must be one of: ${candidates.join(", ")}).\n${basePrompt}`;
+    }
+    return candidates[0] as PlayerId;
   }
 
   async wantsMayorRedirect(context: MayorRedirectContext): Promise<PlayerId | null> {
@@ -178,13 +202,25 @@ export class NetworkDecisionProvider implements StorytellerDecisionProvider {
  * currently being asked. Same free-text-prompt/parse-here approach as above.
  */
 export class NetworkPlayerChoiceProvider implements PlayerChoiceProvider {
-  private readonly pending = new Map<string, (value: string) => void>();
+  private readonly pending = new Map<string, { socketId: string; resolve: (value: string) => void }>();
 
   constructor(private readonly getPlayerSocket: (playerId: PlayerId) => Socket | undefined) {}
 
-  resolveChoice(requestId: string, value: string): void {
-    this.pending.get(requestId)?.(value);
+  /** Only resolves if `fromSocketId` is the socket the prompt was actually sent to - prevents another connection from answering on that player's behalf. */
+  resolveChoice(requestId: string, value: string, fromSocketId: string): void {
+    const entry = this.pending.get(requestId);
+    if (!entry || entry.socketId !== fromSocketId) return;
     this.pending.delete(requestId);
+    entry.resolve(value);
+  }
+
+  /** Falls back to the empty answer (which requestPlayerChoice below turns into its candidate fallback) if the targeted player disconnects before answering - otherwise the game would hang forever. */
+  handleDisconnect(socketId: string): void {
+    for (const [requestId, entry] of this.pending) {
+      if (entry.socketId !== socketId) continue;
+      this.pending.delete(requestId);
+      entry.resolve("");
+    }
   }
 
   async requestPlayerChoice(prompt: ChoosePlayersPrompt): Promise<PlayerId[]> {
@@ -192,18 +228,30 @@ export class NetworkPlayerChoiceProvider implements PlayerChoiceProvider {
     const fallback = () => prompt.candidates.slice(0, prompt.count);
     if (!socket) return fallback();
 
-    const requestId = randomUUID();
-    const promptText = `As the ${prompt.characterId}, choose ${prompt.count} player(s) from: ${prompt.candidates.join(", ")}`;
-    const answer = await new Promise<string>((resolve) => {
-      this.pending.set(requestId, resolve);
-      socket.emit("night:prompt", { requestId, prompt: promptText, count: prompt.count, candidates: prompt.candidates });
-    });
+    const basePromptText = `As the ${prompt.characterId}, choose ${prompt.count} player(s) from: ${prompt.candidates.join(", ")}`;
+    let promptText = basePromptText;
+    const MAX_ATTEMPTS = 5;
+    for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+      if (!socket.connected) return fallback();
 
-    const names = answer
-      .split(/[,\s]+/)
-      .map((s) => s.trim())
-      .filter(Boolean);
-    const valid = names.filter((n) => prompt.candidates.includes(n));
-    return valid.length >= prompt.count ? valid.slice(0, prompt.count) : fallback();
+      const requestId = randomUUID();
+      const answer = await new Promise<string>((resolve) => {
+        this.pending.set(requestId, { socketId: socket.id, resolve });
+        socket.emit("night:prompt", { requestId, prompt: promptText, count: prompt.count, candidates: prompt.candidates });
+      });
+
+      const names = answer
+        .split(/[,\s]+/)
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const valid = names.filter((n) => prompt.candidates.includes(n));
+      if (valid.length >= prompt.count) return valid.slice(0, prompt.count);
+
+      if (!socket.connected) return fallback(); // disconnect resolved the prompt with "" - don't re-prompt a dead socket
+      promptText = `"${answer.trim()}" is not a valid choice - pick exactly ${prompt.count} name(s) from: ${prompt.candidates.join(", ")}.\n${basePromptText}`;
+    }
+
+    // Repeated bad input - fall back rather than loop forever.
+    return fallback();
   }
 }

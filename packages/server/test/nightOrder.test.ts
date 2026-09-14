@@ -138,3 +138,49 @@ describe("Ravenkeeper/Undertaker conditions", () => {
     expect(log).toEqual(["poisoner", "monk", "imp", "ravenkeeper", "empath", "fortune-teller", "undertaker", "butler"]);
   });
 });
+
+describe("runNight onResult callback", () => {
+  it("delivers a private result the instant it's recorded, not batched until the whole night order finishes", async () => {
+    // Regression test: Ravenkeeper (and every other info character) used to have their
+    // result withheld in the returned Map until runNight() fully resolved, so a player
+    // woken early in the order wouldn't see their info until the rest of the night -
+    // including slower players later in the order - finished too.
+    const grimoire = buildGrimoire([
+      { id: "poisoner", characterId: "poisoner" },
+      { id: "monk", characterId: "monk" },
+      { id: "imp", characterId: "imp" },
+      { id: "rk", characterId: "ravenkeeper" },
+      { id: "empath", characterId: "empath" },
+      { id: "fortune-teller", characterId: "fortune-teller" },
+      { id: "ut", characterId: "undertaker" },
+      { id: "butler", characterId: "butler" },
+      { id: "victim", characterId: "saint" },
+    ]);
+    grimoire.startDay(1);
+    applyDeath(grimoire, "victim", "execution");
+
+    const events: string[] = [];
+    const handlers: Partial<Record<string, NightActionHandler>> = {};
+    for (const [characterId, handler] of Object.entries(TROUBLE_BREWING_NIGHT_HANDLERS)) {
+      handlers[characterId] = async (ctx) => {
+        events.push(`start:${characterId}`);
+        return handler!(ctx);
+      };
+    }
+
+    await runNight({
+      grimoire,
+      nightNumber: 2,
+      rng: new Rng(1),
+      decisionProvider: new ScriptedDecisionProvider(grimoire),
+      playerChoiceProvider: new ScriptedPlayerChoiceProvider((prompt) => (prompt.characterId === "imp" ? ["rk"] : undefined)),
+      handlers,
+      onResult: (playerId) => events.push(`result:${playerId}`),
+    });
+
+    const ravenkeeperResult = events.indexOf("result:rk");
+    const empathStart = events.indexOf("start:empath");
+    expect(ravenkeeperResult).toBeGreaterThanOrEqual(0);
+    expect(ravenkeeperResult).toBeLessThan(empathStart);
+  });
+});

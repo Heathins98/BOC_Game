@@ -17,6 +17,8 @@ export interface RunNightOptions {
   playerChoiceProvider: PlayerChoiceProvider;
   /** Overrides the script's registered handlers - a seam for tests that need to observe every invocation. */
   handlers?: Partial<Record<string, NightActionHandler>>;
+  /** Called the instant a private result is recorded, rather than making callers wait for the whole night order to finish before they can see any of it. */
+  onResult?: ((playerId: PlayerId, result: unknown) => void) | undefined;
 }
 
 /**
@@ -35,6 +37,7 @@ export async function runNight({
   decisionProvider,
   playerChoiceProvider,
   handlers: handlerOverrides,
+  onResult,
 }: RunNightOptions): Promise<Map<PlayerId, unknown>> {
   grimoire.startNight(nightNumber);
   const order = nightNumber === 1 ? grimoire.script.firstNightOrder : grimoire.script.otherNightOrder;
@@ -45,6 +48,7 @@ export async function runNight({
 
   if (nightNumber === 1) {
     applyDemonInfo(grimoire, privateResults);
+    for (const [playerId, result] of privateResults) onResult?.(playerId, result);
   }
 
   for (const slot of order) {
@@ -66,7 +70,11 @@ export async function runNight({
     const handler = handlers[slot.characterId];
     if (!handler) continue; // in-play but has no state-mutating night action
 
+    const hadResultBefore = privateResults.has(playerId);
     await handler({ grimoire, playerId, rng, decisionProvider, playerChoiceProvider, privateResults });
+    if (!hadResultBefore && privateResults.has(playerId)) {
+      onResult?.(playerId, privateResults.get(playerId));
+    }
   }
 
   return privateResults;

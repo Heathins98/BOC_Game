@@ -1,10 +1,14 @@
 import { createServer } from "node:http";
-import { randomUUID } from "node:crypto";
+import { randomUUID, randomInt } from "node:crypto";
 import { Server, type Socket } from "socket.io";
 import { Rng, TROUBLE_BREWING } from "@boc/shared";
 import type { CharacterId, PlayerId, Team } from "@boc/shared";
 import { GameSession, randomComposition, type WinResult } from "@boc/server";
 import { NetworkDecisionProvider, NetworkPlayerChoiceProvider } from "./networkProviders.js";
+
+function generateSessionCode(): string {
+  return String(randomInt(0, 1_000_000)).padStart(6, "0");
+}
 
 function parseArgs() {
   const args = process.argv.slice(2);
@@ -12,10 +16,13 @@ function parseArgs() {
     const i = args.indexOf(flag);
     return i >= 0 && args[i + 1] !== undefined ? (args[i + 1] as string) : fallback;
   };
+  const seedArg = get("--seed", "");
+  const codeArg = get("--code", "");
   return {
     players: Number(get("--players", "5")),
     port: Number(get("--port", "3131")),
-    seed: Number(get("--seed", String(Date.now() % 1_000_000))),
+    seed: seedArg ? Number(seedArg) : randomInt(0, 1_000_000_000),
+    code: codeArg || generateSessionCode(),
     townHallSeconds: Number(get("--townhall-seconds", "120")),
     noMisregistration: args.includes("--no-misregistration"),
     voteSeconds: Number(get("--vote-seconds", "5")),
@@ -26,6 +33,7 @@ const {
   players: expectedPlayerCount,
   port,
   seed,
+  code: sessionCode,
   townHallSeconds: defaultTownHallSeconds,
   noMisregistration,
   voteSeconds,
@@ -33,6 +41,13 @@ const {
 
 function log(message: string): void {
   console.log(`[${new Date().toISOString()}] ${message}`);
+}
+
+/** For server-log lines: "playerId (characterId)" when a game is in progress and the player is in it, else just the bare id. */
+function describePlayer(playerId: PlayerId | undefined): string {
+  if (!playerId) return "unknown";
+  const characterId = session?.grimoire.allPlayers().find((p) => p.id === playerId)?.characterId;
+  return characterId ? `${playerId} (${characterId})` : playerId;
 }
 
 process.on("uncaughtException", (err) => {
@@ -43,7 +58,7 @@ process.on("unhandledRejection", (reason) => {
 });
 
 const httpServer = createServer();
-const io = new Server(httpServer, { cors: { origin: "*" } });
+const io = new Server(httpServer, { cors: { origin: false } });
 
 const players = new Map<PlayerId, Socket>();
 const readyPlayers = new Set<PlayerId>();
@@ -73,7 +88,7 @@ let nominationsForced = false;
 let voteClockCurrentVoterId: PlayerId | null = null;
 let voteTurnEndsAt: number | null = null;
 let voteTurnTimer: NodeJS.Timeout | null = null;
-const pendingVoteResponses = new Map<string, (voted: boolean) => void>();
+const pendingVoteResponses = new Map<string, { voterId: PlayerId; finish: (voted: boolean) => void }>();
 
 const decisionProvider = new NetworkDecisionProvider(() => storytellerSocket, noMisregistration);
 const playerChoiceProvider = new NetworkPlayerChoiceProvider((id) => players.get(id));
@@ -215,7 +230,7 @@ function announceGameOver(win: WinResult) {
   resolvePhaseAdvance = null;
   resolveVoteStart?.();
   resolveVoteStart = null;
-  for (const finish of pendingVoteResponses.values()) finish(false);
+  for (const pending of pendingVoteResponses.values()) pending.finish(false);
   pendingVoteResponses.clear();
   if (voteTurnTimer) {
     clearTimeout(voteTurnTimer);
@@ -501,6 +516,7 @@ async function confirmDraftAndStartGame(): Promise<void> {
     rng,
   });
   decisionProvider.grimoire = session.grimoire;
+  log("Grimoire: " + session.grimoire.allPlayers().map((p) => `${p.id}=${p.characterId} (${p.alignment})`).join(", "));
 
   broadcastRoles();
   broadcastFullGrimoire();
@@ -523,7 +539,7 @@ function waitForVoteResponse(voterId: PlayerId, nominatorId: PlayerId, nomineeId
       pendingVoteResponses.delete(requestId);
       resolve(voted);
     };
-    pendingVoteResponses.set(requestId, finish);
+    pendingVoteResponses.set(requestId, { voterId, finish });
     players.get(voterId)?.emit("vote:prompt", { requestId, nominatorId, nomineeId, secondsLeft: seconds });
     voteTurnTimer = setTimeout(() => finish(false), seconds * 1000);
   });
@@ -596,10 +612,9 @@ async function runNightDayLoop() {
   const activeSession = session!;
   while (!gameOver) {
     log(`--- Night ${activeSession.grimoire.nightNumber + 1} ---`);
-    const nightResults = await activeSession.runNight();
-    for (const [playerId, result] of nightResults) {
+    await activeSession.runNight((playerId, result) => {
       players.get(playerId)?.emit("night:info", { result });
-    }
+    });
     broadcastPublicState();
     broadcastFullGrimoire();
     if (checkAndAnnounceWin()) break;
@@ -640,22 +655,26 @@ async function runNightDayLoop() {
 }
 
 io.on("connection", (socket) => {
-  socket.on("join", ({ name }: { name: string }) => {
-    if (session || draft) {
-      socket.emit("error", { message: "The game has already started." });
+  socket.on("join", ({ name, code }: { name: string; code: string }) => {
+    if (code !== sessionCode) {
+      socket.emit("error", { message: "Invalid session code.", reason: "invalid-code" });
       return;
     }
-    const trimmed = (name ?? "").trim();
+    if (session || draft) {
+      socket.emit("error", { message: "The game has already started.", reason: "already-started" });
+      return;
+    }
+    const trimmed = typeof name === "string" ? name.trim() : "";
     if (!/^[A-Za-z0-9_-]+$/.test(trimmed)) {
-      socket.emit("error", { message: "Names must be a single word: letters, numbers, - or _ only." });
+      socket.emit("error", { message: "Names must be a single word: letters, numbers, - or _ only.", reason: "invalid-name" });
       return;
     }
     if (players.has(trimmed)) {
-      socket.emit("error", { message: "That name is already taken." });
+      socket.emit("error", { message: "That name is already taken.", reason: "name-taken" });
       return;
     }
     if (players.size >= expectedPlayerCount) {
-      socket.emit("error", { message: `The table is full (${expectedPlayerCount} players expected).` });
+      socket.emit("error", { message: `The table is full (${expectedPlayerCount} players expected).`, reason: "table-full" });
       return;
     }
     players.set(trimmed, socket);
@@ -665,7 +684,15 @@ io.on("connection", (socket) => {
     broadcastLobbyUpdate();
   });
 
-  socket.on("join-storyteller", () => {
+  socket.on("join-storyteller", ({ code }: { code: string }) => {
+    if (code !== sessionCode) {
+      socket.emit("error", { message: "Invalid session code.", reason: "invalid-code" });
+      return;
+    }
+    if (storytellerSocket && storytellerSocket.connected) {
+      socket.emit("error", { message: "A Storyteller is already connected.", reason: "storyteller-taken" });
+      return;
+    }
     storytellerSocket = socket;
     socket.emit("joined-storyteller", {});
     log("Storyteller connected.");
@@ -705,6 +732,7 @@ io.on("connection", (socket) => {
 
   socket.on("st:setSeatOrder", ({ playerIds }: { playerIds: string[] }) => {
     if (socket !== storytellerSocket) return;
+    if (!Array.isArray(playerIds)) return;
     const err = setSeatOrder(playerIds);
     if (err) sendInfoToStoryteller(err);
     else broadcastDraftGrimoire();
@@ -729,24 +757,25 @@ io.on("connection", (socket) => {
 
   socket.on("night:submitChoice", ({ requestId, value }: { requestId: string; value: string }) => {
     const playerId = socket.data.playerId as PlayerId | undefined;
-    log(`${playerId ?? "unknown"} answered a night prompt: ${value}`);
-    playerChoiceProvider.resolveChoice(requestId, value);
+    log(`${describePlayer(playerId)} answered a night prompt: ${value}`);
+    playerChoiceProvider.resolveChoice(requestId, value, socket.id);
   });
 
   socket.on("vote:submitChoice", ({ requestId, value }: { requestId: string; value: string }) => {
-    const finish = pendingVoteResponses.get(requestId);
-    if (!finish) return;
+    const pending = pendingVoteResponses.get(requestId);
+    if (!pending || socket.data.playerId !== pending.voterId) return;
     const playerId = socket.data.playerId as PlayerId | undefined;
-    log(`${playerId ?? "unknown"} voted: ${value}`);
-    finish(/^y/i.test(value.trim()));
+    log(`${describePlayer(playerId)} voted: ${value}`);
+    pending.finish(/^y/i.test(value.trim()));
   });
 
   socket.on("st:decisionResponse", ({ requestId, value }: { requestId: string; value: string }) => {
     log(`Storyteller answered a decision prompt: ${value}`);
-    decisionProvider.resolveDecision(requestId, value);
+    decisionProvider.resolveDecision(requestId, value, socket.id);
   });
 
   socket.on("st:startTownHall", (payload: { seconds?: number | null } = {}) => {
+    if (socket !== storytellerSocket) return;
     if (!session || gameOver || session.grimoire.phase !== "day") return;
     log(`Storyteller started Town Hall (seconds=${payload.seconds ?? "default"}).`);
     resolveTownHallStart?.(payload.seconds ?? null);
@@ -754,6 +783,7 @@ io.on("connection", (socket) => {
   });
 
   socket.on("st:startVoting", () => {
+    if (socket !== storytellerSocket) return;
     if (!session || gameOver || session.grimoire.phase !== "nominations") return;
     if (nominationSubPhase !== "discussing") return;
     log("Storyteller started the voting clock.");
@@ -761,13 +791,14 @@ io.on("connection", (socket) => {
   });
 
   socket.on("st:forceAdvance", () => {
+    if (socket !== storytellerSocket) return;
     if (!session || gameOver) return;
     const phase = session.grimoire.phase;
     if (phase !== "townhall" && phase !== "nominations") return;
     log(`Storyteller forced the end of the "${phase}" stage.`);
     if (phase === "nominations") {
       nominationsForced = true;
-      for (const finish of pendingVoteResponses.values()) finish(false);
+      for (const pending of pendingVoteResponses.values()) pending.finish(false);
       triggerVoteStart();
     }
     triggerPhaseAdvance();
@@ -775,7 +806,7 @@ io.on("connection", (socket) => {
 
   socket.on("player:command", ({ line }: { line: string }) => {
     const playerId = socket.data.playerId as PlayerId | undefined;
-    if (playerId) void handlePlayerCommand(playerId, line);
+    if (playerId && typeof line === "string") void handlePlayerCommand(playerId, line);
   });
 
   socket.on("status:poll", () => {
@@ -803,12 +834,19 @@ io.on("connection", (socket) => {
       draft = null;
       broadcastInfo(`${playerId ?? "A player"} disconnected during setup - the draft was discarded.`);
     }
+    if (!session && playerId && players.get(playerId) === socket) {
+      players.delete(playerId);
+      readyPlayers.delete(playerId);
+    }
+    decisionProvider.handleDisconnect(socket.id);
+    playerChoiceProvider.handleDisconnect(socket.id);
     broadcastLobbyUpdate();
   });
 });
 
 httpServer.listen(port, () => {
   log(`Blood on the Clocktower playtest server listening on port ${port}.`);
+  log(`Session code: ${sessionCode} - share this with your Storyteller and players.`);
   log(`Town Hall default duration: ${defaultTownHallSeconds}s (0 = untimed by default).`);
   log(`Waiting for ${expectedPlayerCount} players and 1 Storyteller to connect...`);
 });
