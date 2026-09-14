@@ -192,3 +192,7 @@ Roughly in order:
 3. Reconnect support (a disconnected player's future prompts currently just silently fall back to a default choice instead of waiting for them).
 4. Additional scripts beyond Trouble Brewing.
 5. Internet-hosted play (the playtest tool is LAN/localhost-first today; see `docs/ARCHITECTURE.md` for why it's already built to make that an easy next step).
+
+## License
+
+The original code in this repository is [MIT licensed](LICENSE). This is an unofficial, non-commercial fan project — it is not affiliated with the creators of Blood on the Clocktower, and claims no ownership of the game itself. See [NOTICE.md](NOTICE.md) for details.
