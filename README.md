@@ -65,13 +65,14 @@ BOC_Game/
 │   │   └── src/                 # interfaces, a seedable RNG - no game logic lives here
 │   ├── server/                  # The headless rules engine
 │   │   ├── src/engine/          #   Grimoire, setup/dealing, night & day engines, win conditions
-│   │   └── test/                #   70 tests: every character, edge cases, a full-game simulation suite
+│   │   └── test/                #   93 tests: every character, edge cases, a full-game simulation suite
 │   └── playtest/                # Socket.IO server + terminal clients to actually play
 │       └── src/
 │           ├── server.ts            # Game orchestration + socket protocol
 │           ├── playerClient.ts      # CLI a player runs on their own device
 │           ├── storytellerClient.ts # CLI the Storyteller runs
-│           └── networkProviders.ts  # Bridges the engine's decision hooks over sockets
+│           ├── networkProviders.ts  # Bridges the engine's decision hooks over sockets
+│           └── botSmokeTest.ts      # Internal smoke test: drives a full game over real sockets with bots
 ├── pnpm-workspace.yaml
 └── package.json
 ```
@@ -83,7 +84,7 @@ git clone <this repo>
 cd BOC_Game
 pnpm install     # install every workspace package's dependencies
 pnpm build       # compile packages/shared and packages/server
-pnpm test        # run the full engine test suite (70 tests)
+pnpm test        # run the full engine test suite (93 tests)
 ```
 
 ## Play a game
@@ -186,7 +187,7 @@ pnpm test          # every package
 pnpm --filter @boc/server test   # just the engine
 ```
 
-The engine suite (70 tests) covers every character's ability (including drunk/poisoned variants), night-order sequencing, day/nomination/voting edge cases, kill resolution (Monk/Soldier/Mayor/Scarlet Woman/Imp promotion), and win conditions — plus a seeded **full-game simulation suite** that has been stress-tested across 1,100+ randomized games (5–15 players) with zero failures.
+The engine suite (93 tests) covers every character's ability (including drunk/poisoned variants), night-order sequencing, day/nomination/voting edge cases, kill resolution (Monk/Soldier/Mayor/Scarlet Woman/Imp promotion), and win conditions — plus a seeded **full-game simulation suite** that runs 30 randomized games (5–15 players, 6 player counts × 5 seeds each) with zero failures.
 
 ## Roadmap
 
